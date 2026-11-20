@@ -20,6 +20,10 @@ final class Coordinator: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(appActivated(_:)),
             name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        // Background windows on the other screen need their AX tree ready too.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(appActivated(_:)),
+            name: NSWorkspace.didLaunchApplicationNotification, object: nil)
         waitForAccessibility()
     }
 
@@ -28,13 +32,14 @@ final class Coordinator: NSObject, NSApplicationDelegate {
     private func waitForAccessibility() {
         if AX.isTrusted(prompt: true) {
             installTap()
-            if let app = NSWorkspace.shared.frontmostApplication { AX.enableManualAccessibility(pid: app.processIdentifier) }
+            enableManualAccessibilityForRunningApps()
             return
         }
         Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] timer in
             guard AX.isTrusted(prompt: false) else { return }
             timer.invalidate()
             self?.installTap()
+            self?.enableManualAccessibilityForRunningApps()
         }
     }
 
@@ -60,12 +65,18 @@ final class Coordinator: NSObject, NSApplicationDelegate {
         item.button?.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "Keyhint")
         item.button?.appearsDisabled = true
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Hints: ⌃F", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Scroll: ⌃J", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Hints: ⌘⇧F", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Scroll: ⌘⇧J", action: nil, keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Keyhint", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         item.menu = menu
         statusItem = item
+    }
+
+    private func enableManualAccessibilityForRunningApps() {
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && app.processIdentifier != getpid() {
+            AX.enableManualAccessibility(pid: app.processIdentifier)
+        }
     }
 
     @objc private func appActivated(_ notification: Notification) {
@@ -113,7 +124,7 @@ final class Coordinator: NSObject, NSApplicationDelegate {
 
     private static func trigger(keyCode: Int64, flags: CGEventFlags) -> Trigger? {
         let modifiers = flags.intersection([.maskCommand, .maskShift, .maskAlternate, .maskControl])
-        guard modifiers == [.maskControl] else { return nil }
+        guard modifiers == [.maskCommand, .maskShift] else { return nil }
         switch keyCode {
         case 3: return .hint // F
         case 38: return .scroll // J
@@ -126,13 +137,12 @@ final class Coordinator: NSObject, NSApplicationDelegate {
     private func start(_ trigger: Trigger) {
         state = .pending
         DispatchQueue.main.async { [self] in
-            guard let app = NSWorkspace.shared.frontmostApplication else { return finish() }
             switch trigger {
             case .hint:
-                guard let mode = HintMode(app: app, overlay: overlay) else { NSSound.beep(); return finish() }
+                guard let mode = HintMode(overlay: overlay) else { NSSound.beep(); return finish() }
                 state = .hint(mode)
             case .scroll:
-                guard let mode = ScrollMode(app: app, overlay: overlay) else { NSSound.beep(); return finish() }
+                guard let mode = ScrollMode(overlay: overlay) else { NSSound.beep(); return finish() }
                 state = .scroll(mode)
             }
         }

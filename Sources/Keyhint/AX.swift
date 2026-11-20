@@ -75,6 +75,130 @@ enum AX {
         if let windows = attribute(appElement, kAXWindowsAttribute) as? [AXUIElement] { return windows.first }
         return nil
     }
+
+    /// The window to work on for every screen: the focused window of the frontmost app first,
+    /// then, for each other screen, the frontmost normal window whose centre lies on it.
+    static func visibleWindows() -> [AXUIElement] {
+        var result: [AXUIElement] = []
+        var claimedScreens = Set<Int>()
+        let screens = NSScreen.screens.map { axRect(fromCocoa: $0.frame) }
+
+        func claim(_ frame: CGRect) -> Bool {
+            let center = CGPoint(x: frame.midX, y: frame.midY)
+            guard let index = screens.firstIndex(where: { $0.contains(center) }) else { return false }
+            return claimedScreens.insert(index).inserted
+        }
+
+        if let app = NSWorkspace.shared.frontmostApplication, let window = focusedWindow(of: app) {
+            result.append(window)
+            if let frame = frame(window) { _ = claim(frame) }
+        }
+
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let infos = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return result }
+        let ownPid = getpid()
+        // The list is ordered front to back.
+        for info in infos where claimedScreens.count < screens.count {
+            guard (info[kCGWindowLayer as String] as? Int) == 0,
+                  let pid = info[kCGWindowOwnerPID as String] as? pid_t, pid != ownPid,
+                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let boundsDict = info[kCGWindowBounds as String],
+                  let bounds = CGRect(dictionaryRepresentation: boundsDict as! CFDictionary),
+                  bounds.width > 50, bounds.height > 50,
+                  let window = window(pid: pid, matching: bounds),
+                  !result.contains(where: { CFEqual($0, window) }),
+                  claim(bounds)
+            else { continue }
+            result.append(window)
+        }
+        return result
+    }
+
+    private static func window(pid: pid_t, matching bounds: CGRect) -> AXUIElement? {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.5)
+        guard let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] else { return nil }
+        return windows.first { window in
+            guard let frame = frame(window) else { return false }
+            return abs(frame.minX - bounds.minX) < 3 && abs(frame.minY - bounds.minY) < 3
+                && abs(frame.width - bounds.width) < 3 && abs(frame.height - bounds.height) < 3
+        }
+    }
+
+    /// Runs `body` for each window on its own thread and concatenates the results in window order.
+    static func concurrentMap<T>(_ windows: [AXUIElement], _ body: (AXUIElement) -> [T]) -> [T] {
+        var results = Array(repeating: [T](), count: windows.count)
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: windows.count) { index in
+            let value = body(windows[index])
+            lock.lock()
+            results[index] = value
+            lock.unlock()
+        }
+        return results.flatMap { $0 }
+    }
+}
+
+/// Finds regions that can be scrolled. Native apps expose AXScrollArea; web content (Chrome,
+/// Slack and other Electron apps) usually does not, so lists and elements whose DOM class
+/// mentions "scroll" stand in for them.
+final class ScrollRegionCollector {
+    private static let regionRoles: Set<String> = [
+        "AXScrollArea", "AXWebArea", "AXOutline", "AXList", "AXTable", "AXGrid", "AXBrowser",
+    ]
+    private static let leafRoles: Set<String> = [
+        "AXStaticText", "AXLink", "AXButton", "AXImage", "AXTextField", "AXTextArea", "AXCheckBox",
+        "AXRadioButton", "AXPopUpButton", "AXMenuButton", "AXHeading", "AXRow", "AXCell",
+    ]
+    private static let minSize = CGSize(width: 120, height: 100)
+
+    private var regions: [CGRect] = []
+    private var visited = 0
+    private let deadline = Date().addingTimeInterval(0.8)
+
+    func collect(window: AXUIElement) -> [CGRect] {
+        guard let windowFrame = AX.frame(window) else { return [] }
+        walk(window, clip: windowFrame, depth: 0)
+        if regions.isEmpty { regions.append(windowFrame) }
+        return regions
+    }
+
+    private func walk(_ element: AXUIElement, clip: CGRect, depth: Int) {
+        visited += 1
+        if depth > 80 || visited > 4000 || Date() > deadline { return }
+
+        let values = AX.attributes(element, [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, "AXDOMClassList"])
+        let role = values[0] as? String ?? ""
+        var visible = clip
+        if let origin = AX.point(values[1]), let size = AX.size(values[2]), size.width > 0, size.height > 0 {
+            visible = clip.intersection(CGRect(origin: origin, size: size))
+            // Children of a small element are smaller still, so the whole subtree can go.
+            if visible.isNull || visible.width < Self.minSize.width || visible.height < Self.minSize.height { return }
+        }
+        if Self.leafRoles.contains(role) { return }
+
+        let classes = values[3] as? [String] ?? []
+        if Self.regionRoles.contains(role) || classes.contains(where: { $0.lowercased().contains("scroll") }) {
+            add(visible)
+        }
+
+        guard let children = AX.attribute(element, kAXChildrenAttribute) as? [AXUIElement] else { return }
+        let childClip = role == "AXScrollArea" ? visible : clip
+        for child in children {
+            walk(child, clip: childClip, depth: depth + 1)
+        }
+    }
+
+    /// Nested wrappers often share one frame (e.g. a scroll container inside a scrollbar hider).
+    private func add(_ rect: CGRect) {
+        let duplicate = regions.contains { existing in
+            let overlap = existing.intersection(rect)
+            guard !overlap.isNull else { return false }
+            let union = existing.union(rect)
+            return overlap.width * overlap.height / (union.width * union.height) > 0.85
+        }
+        if !duplicate { regions.append(rect) }
+    }
 }
 
 /// Walks a window's accessibility tree and collects elements worth a hint.

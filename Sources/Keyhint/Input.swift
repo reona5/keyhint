@@ -8,6 +8,10 @@ enum Key {
     static let escape: Int64 = 53
     static let delete: Int64 = 51
     static let returnKey: Int64 = 36
+    static let tab: Int64 = 48
+
+    /// 1…9, 0 in label order.
+    static let digits: [Int64] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29]
 
     static let letters: [Int64: Character] = [
         0: "a", 11: "b", 8: "c", 2: "d", 14: "e", 3: "f", 5: "g", 4: "h", 34: "i", 38: "j",
@@ -37,8 +41,15 @@ enum Mouse {
     static func scroll(at point: CGPoint, dx: Int32, dy: Int32) {
         guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else { return }
         event.location = point
+        // A still-held ⌃ would turn the scroll into a zoom in Chromium-based apps.
+        event.flags = []
         event.post(tap: .cghidEventTap)
     }
+}
+
+func axRect(fromCocoa rect: CGRect) -> CGRect {
+    let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+    return CGRect(x: rect.minX, y: primaryHeight - rect.maxY, width: rect.width, height: rect.height)
 }
 
 /// Converts global AX coordinates (top-left origin) to Cocoa screen coordinates (bottom-left origin).

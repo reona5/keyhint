@@ -4,24 +4,19 @@ struct HintLabel {
     let label: String
     /// Element frame in Cocoa global coordinates.
     let frame: CGRect
+    /// Region labels sit in the top-left corner instead of on the left edge.
+    var topLeft = false
 }
 
 /// Transparent, click-through panels (one per screen) that draw hint labels or a scroll-mode border.
 final class Overlay {
     private var panels: [NSPanel] = []
 
-    func showHints(_ hints: [HintLabel], typed: String) {
+    func show(hints: [HintLabel], typed: String = "", border: CGRect? = nil) {
         render { view in
             view.hints = hints
             view.typed = typed
-            view.border = nil
-        }
-    }
-
-    func showBorder(_ frame: CGRect) {
-        render { view in
-            view.hints = []
-            view.border = frame
+            view.border = border
         }
     }
 
@@ -102,7 +97,9 @@ final class OverlayView: NSView {
         let padding = CGSize(width: 4, height: 1)
         let frame = local(hint.frame)
         // Sit on the element's left edge, vertically centred, nudged inside the screen.
-        var origin = CGPoint(x: frame.minX - 2, y: frame.midY - textSize.height / 2 - padding.height)
+        var origin = hint.topLeft
+            ? CGPoint(x: frame.minX + 6, y: frame.maxY - textSize.height - padding.height * 2 - 6)
+            : CGPoint(x: frame.minX - 2, y: frame.midY - textSize.height / 2 - padding.height)
         origin.x = max(bounds.minX, min(origin.x, bounds.maxX - textSize.width - padding.width * 2))
         origin.y = max(bounds.minY, min(origin.y, bounds.maxY - textSize.height - padding.height * 2))
         let box = CGRect(origin: origin, size: CGSize(width: textSize.width + padding.width * 2,
