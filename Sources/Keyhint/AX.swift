@@ -216,6 +216,14 @@ final class Collector {
         "AXRadioGroupSearchKey", "AXTextFieldSearchKey",
     ]
 
+    /// Roles the web search keys above stand for, for a browser that ignores the keys. Rows and
+    /// cells are left out because in an article they are tables rather than controls.
+    private static let webClickableRoles: Set<String> = [
+        "AXButton", "AXLink", "AXCheckBox", "AXRadioButton", "AXRadioGroup", "AXPopUpButton",
+        "AXMenuButton", "AXMenuItem", "AXTextField", "AXTextArea", "AXComboBox", "AXSlider",
+        "AXIncrementor", "AXDisclosureTriangle",
+    ]
+
     private(set) var targets: [Target] = []
     private var seenFrames = Set<String>()
     private let deadline: Date
@@ -247,8 +255,9 @@ final class Collector {
             if visible.isNull || visible.width < 2 || visible.height < 2 { return }
         }
 
-        if role == "AXWebArea" {
-            collectWeb(element, clip: visible)
+        // Ladybird nests its searchable web area inside a wrapper AXWebArea that cannot be searched,
+        // so a web area the browser cannot search is walked like any other container.
+        if role == "AXWebArea", collectWeb(element, clip: visible) {
             return
         }
 
@@ -267,7 +276,8 @@ final class Collector {
 
     /// Web content is too deep to walk node by node, so ask the browser to search it for us.
     /// Chromium used to reject multiple search keys in one query, hence the per-key fallback.
-    private func collectWeb(_ webArea: AXUIElement, clip: CGRect) {
+    /// Returns false when the web area does not support searching at all.
+    private func collectWeb(_ webArea: AXUIElement, clip: CGRect) -> Bool {
         var query: [String: Any] = [
             "AXDirection": "AXDirectionNext",
             "AXImmediateDescendantsOnly": false,
@@ -275,28 +285,39 @@ final class Collector {
             "AXVisibleOnly": true,
             "AXSearchKey": Self.webSearchKeys,
         ]
-        var found = search(webArea, query)
+        guard var found = search(webArea, query) else { return false }
         if found.isEmpty {
             for key in Self.webSearchKeys {
                 query["AXSearchKey"] = key
-                found.append(contentsOf: search(webArea, query))
+                found.append(contentsOf: search(webArea, query) ?? [])
             }
         }
-        for element in found {
-            if exhausted { return }
-            let values = AX.attributes(element, [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute])
+        let foundValues = found.map {
+            AX.attributes($0, [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute])
+        }
+        // Ladybird ignores AXSearchKey and returns every element, text and headings included. None of the
+        // keys matches static text, so its presence tells such a browser apart. The role filter is not
+        // applied to Chromium, whose control key also yields rows that are clickable there (Slack's
+        // channel list) and that the filter would drop.
+        let ignoresSearchKeys = foundValues.contains { $0[0] as? String == "AXStaticText" }
+        for (element, values) in zip(found, foundValues) {
+            if exhausted { return true }
+            let role = values[0] as? String ?? ""
+            if ignoresSearchKeys && !Self.webClickableRoles.contains(role) { continue }
             guard let origin = AX.point(values[1]), let size = AX.size(values[2]) else { continue }
             let visible = clip.intersection(CGRect(origin: origin, size: size))
             if visible.isNull || visible.width < 2 || visible.height < 2 { continue }
-            add(element, role: values[0] as? String ?? "", frame: visible, isWeb: true)
+            add(element, role: role, frame: visible, isWeb: true)
         }
+        return true
     }
 
-    private func search(_ element: AXUIElement, _ query: [String: Any]) -> [AXUIElement] {
+    /// nil when the element cannot be searched.
+    private func search(_ element: AXUIElement, _ query: [String: Any]) -> [AXUIElement]? {
         var value: CFTypeRef?
         let error = AXUIElementCopyParameterizedAttributeValue(
             element, "AXUIElementsForSearchPredicate" as CFString, query as CFDictionary, &value)
-        guard error == .success else { return [] }
+        guard error == .success else { return nil }
         return value as? [AXUIElement] ?? []
     }
 
