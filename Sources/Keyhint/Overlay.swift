@@ -96,6 +96,9 @@ final class OverlayView: NSView {
         let textSize = text.size()
         let padding = CGSize(width: 4, height: 1)
         let frame = local(hint.frame)
+        // Every screen's panel receives the hints of all screens. Without this check, the clamping
+        // below would pull another screen's hints onto this screen's edge.
+        guard bounds.intersects(frame) else { return }
         // Sit on the element's left edge, vertically centred, nudged inside the screen.
         var origin = hint.topLeft
             ? CGPoint(x: frame.minX + 6, y: frame.maxY - textSize.height - padding.height * 2 - 6)

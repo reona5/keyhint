@@ -159,7 +159,11 @@ final class ScrollRegionCollector {
     func collect(window: AXUIElement) -> [CGRect] {
         guard let windowFrame = AX.frame(window) else { return [] }
         walk(window, clip: windowFrame, depth: 0)
-        if regions.isEmpty { regions.append(windowFrame) }
+        // The main content can expose no scrollable element at all (Chrome when it does not build
+        // the page's accessibility tree) while a side pane does (Chrome's vertical tab list). Falling
+        // back only when nothing was found would then leave only the side pane to scroll.
+        let center = CGPoint(x: windowFrame.midX, y: windowFrame.midY)
+        if !regions.contains(where: { $0.contains(center) }) { regions.append(windowFrame) }
         return regions
     }
 
