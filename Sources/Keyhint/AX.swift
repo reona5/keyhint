@@ -62,9 +62,13 @@ enum AX {
     }
 
     /// Chromium and Electron only build their accessibility tree when an assistive app asks for it.
+    /// Electron listens for AXManualAccessibility. Chrome does not handle that attribute; it starts
+    /// building the tree when an assistive app reads the application element's role, so the role
+    /// is read here although its value is not needed.
     static func enableManualAccessibility(pid: pid_t) {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        _ = attribute(app, kAXRoleAttribute)
     }
 
     static func focusedWindow(of app: NSRunningApplication) -> AXUIElement? {
